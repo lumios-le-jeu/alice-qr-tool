@@ -1,138 +1,154 @@
 export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-
-    // ===== PAGE WEB =====
-    if (url.pathname === "/") {
-      return new Response(HTML_PAGE, {
-        headers: { "content-type": "text/html;charset=UTF-8" },
+  async fetch(request, env) {
+    if (request.method === "GET") {
+      return new Response(HTML, {
+        headers: { "Content-Type": "text/html; charset=UTF-8" }
       });
     }
 
-    // ===== API =====
-    if (url.pathname === "/api/make") {
-      const input = url.searchParams.get("url");
-      if (!input) {
-        return json({ error: "Missing url parameter" }, 400);
+    if (request.method === "POST") {
+      const form = await request.formData();
+      const file = form.get("audio");
+
+      if (!file) {
+        return new Response("No file", { status: 400 });
       }
 
-      const rawUrl = toRawGithub(input);
-      if (!rawUrl) {
-        return json({ error: "Invalid GitHub URL" }, 400);
-      }
+      const filename = file.name.replace(/\s+/g, "_");
+      const buffer = await file.arrayBuffer();
+      const contentBase64 = btoa(
+        String.fromCharCode(...new Uint8Array(buffer))
+      );
 
-      const shortUrl = await shorten(rawUrl);
-      const qrUrl = makeQr(shortUrl);
+      // ======================
+      // Upload GitHub
+      // ======================
+      const apiUrl = `https://api.github.com/repos/${env.GITHUB_REPO}/contents/${env.GITHUB_AUDIO_PATH}/${filename}`;
 
-      return json({
-        original: input,
-        raw: rawUrl,
-        short: shortUrl,
-        qr: qrUrl,
+      const githubRes = await fetch(apiUrl, {
+        method: "PUT",
+        headers: {
+          "Authorization": `token ${env.GITHUB_TOKEN}`,
+          "Content-Type": "application/json",
+          "User-Agent": "alice-qr-tool"
+        },
+        body: JSON.stringify({
+          message: `add audio ${filename}`,
+          content: contentBase64,
+          branch: env.GITHUB_BRANCH
+        })
       });
+
+      if (!githubRes.ok) {
+        const err = await githubRes.text();
+        return new Response("GitHub error:\n" + err, { status: 500 });
+      }
+
+      // ======================
+      // RAW URL
+      // ======================
+      const rawUrl = `https://raw.githubusercontent.com/${env.GITHUB_REPO}/${env.GITHUB_BRANCH}/${env.GITHUB_AUDIO_PATH}/${filename}`;
+
+      // ======================
+      // Shorten (is.gd)
+      // ======================
+      const shortRes = await fetch(
+        `https://is.gd/create.php?format=simple&url=${encodeURIComponent(rawUrl)}`
+      );
+      const shortUrl = await shortRes.text();
+
+      // ======================
+      // QR CODE (API)
+      // ======================
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=600x600&data=${encodeURIComponent(shortUrl)}`;
+
+      return new Response(
+        JSON.stringify({
+          raw: rawUrl,
+          short: shortUrl,
+          qr: qrUrl
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    return new Response("Not found", { status: 404 });
-  },
+    return new Response("Method not allowed", { status: 405 });
+  }
 };
 
-// ======================
-// HELPERS
-// ======================
-
-function toRawGithub(url) {
-  // blob → raw
-  if (url.includes("github.com") && url.includes("/blob/")) {
-    return url
-      .replace("github.com", "raw.githubusercontent.com")
-      .replace("/blob/", "/");
-  }
-
-  // déjà raw
-  if (url.includes("raw.githubusercontent.com")) {
-    return url;
-  }
-
-  return null;
-}
-
-async function shorten(longUrl) {
-  const api = `https://is.gd/create.php?format=simple&url=${encodeURIComponent(
-    longUrl
-  )}`;
-  const r = await fetch(api);
-  return (await r.text()).trim();
-}
-
-function makeQr(data) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=${encodeURIComponent(
-    data
-  )}`;
-}
-
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj, null, 2), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-// ======================
-// HTML
-// ======================
-
-const HTML_PAGE = `
+const HTML = `
 <!DOCTYPE html>
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <title>Alice – QR Audio Tool</title>
 <style>
-body { font-family: Arial; background:#111; color:#fff; text-align:center; }
-input { width:80%; padding:10px; font-size:16px; }
-button { padding:10px 20px; font-size:16px; margin-top:10px; }
-img { margin-top:20px; border:4px solid #fff; }
-.box { max-width:700px; margin:auto; }
-small { color:#aaa; }
+body {
+  font-family: Arial, sans-serif;
+  background: #f4f4f4;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+.card {
+  background: white;
+  padding: 30px;
+  border-radius: 12px;
+  width: 360px;
+  text-align: center;
+}
+input[type=file] {
+  margin: 20px 0;
+}
+button {
+  padding: 12px 20px;
+  font-size: 16px;
+  cursor: pointer;
+}
+.result {
+  margin-top: 20px;
+  word-break: break-all;
+}
+img {
+  margin-top: 15px;
+  width: 260px;
+}
 </style>
 </head>
+
 <body>
-<div class="box">
-<h1>🎧 Alice – Générateur QR Audio</h1>
+<div class="card">
+  <h2>🎵 Alice QR Tool</h2>
+  <input type="file" id="file" accept=".mp3,.wav"><br>
+  <button onclick="upload()">Générer le QR</button>
 
-<p>Colle un lien GitHub (blob ou raw)</p>
-
-<input id="url" placeholder="https://github.com/.../blob/main/audio/son.mp3">
-<br>
-<button onclick="go()">Générer le QR</button>
-
-<div id="out"></div>
+  <div class="result" id="result"></div>
+</div>
 
 <script>
-async function go() {
-  const u = document.getElementById("url").value;
-  const out = document.getElementById("out");
-  out.innerHTML = "⏳ Génération...";
+async function upload() {
+  const fileInput = document.getElementById("file");
+  if (!fileInput.files.length) return alert("Choisis un fichier audio");
 
-  const r = await fetch("/api/make?url=" + encodeURIComponent(u));
-  const j = await r.json();
+  const data = new FormData();
+  data.append("audio", fileInput.files[0]);
 
-  if (j.error) {
-    out.innerHTML = "❌ " + j.error;
-    return;
-  }
+  const res = await fetch("/", {
+    method: "POST",
+    body: data
+  });
 
-  out.innerHTML = \`
-    <p><b>RAW</b><br><small>\${j.raw}</small></p>
-    <p><b>SHORT</b><br><a href="\${j.short}" target="_blank">\${j.short}</a></p>
-    <img src="\${j.qr}">
-    <p>
-      <a href="\${j.qr}" download="qr_audio.png">⬇️ Télécharger le QR</a>
-    </p>
+  const json = await res.json();
+
+  document.getElementById("result").innerHTML = \`
+    <p><b>RAW :</b><br><a href="\${json.raw}" target="_blank">\${json.raw}</a></p>
+    <p><b>SHORT :</b><br><a href="\${json.short}" target="_blank">\${json.short}</a></p>
+    <img src="\${json.qr}">
+    <p><a href="\${json.qr}" download>📥 Télécharger le QR</a></p>
   \`;
 }
 </script>
-</div>
 </body>
 </html>
 `;
